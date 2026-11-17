@@ -1,0 +1,32 @@
+# Secrets
+.env
+!.env.example
+*.pem
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Node
+node_modules/
+web/dist/
+coverage/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Java
+kitchen-worker/target/
+
+# PHP / Laravel
+stats-api/vendor/
+stats-api/.env
+stats-api/storage/framework/phpstan/
+stats-api/.phpunit.result.cache
+stats-api/.phpunit.cache/

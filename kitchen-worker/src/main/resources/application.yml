@@ -1,0 +1,51 @@
+spring:
+  application:
+    name: kitchen-worker
+  main:
+    web-application-type: none
+    banner-mode: off
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:dhaba}?ApplicationName=kitchen-worker
+    username: ${POSTGRES_USER:dhaba}
+    password: ${POSTGRES_PASSWORD:}
+    hikari:
+      maximum-pool-size: 5
+      connection-timeout: 10000
+      initialization-fail-timeout: -1
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DB:0}
+      timeout: 10s
+  task:
+    scheduling:
+      pool:
+        size: 3
+      shutdown:
+        await-termination: true
+        await-termination-period: 10s
+
+worker:
+  id: ${WORKER_ID:${HOSTNAME:kitchen-worker-local}}
+  version: ${APP_VERSION:1.0.0}
+  max-attempts: ${WORKER_MAX_ATTEMPTS:5}
+  base-backoff: ${WORKER_BASE_BACKOFF:1s}
+  max-backoff: ${WORKER_MAX_BACKOFF:60s}
+  poll-timeout: 2s
+  heartbeat-interval: ${WORKER_HEARTBEAT_INTERVAL:10s}
+  heartbeat-ttl: ${WORKER_HEARTBEAT_TTL:30s}
+  heartbeat-file: ${WORKER_HEARTBEAT_FILE:/tmp/kitchen-worker-heartbeat}
+  auto-advance: ${KITCHEN_AUTO_ADVANCE:true}
+  accept-delay: ${KITCHEN_ACCEPT_DELAY:5s}
+  cook-time: ${KITCHEN_COOK_TIME:20s}
+
+logging:
+  level:
+    root: INFO
+    com.dhaba: ${LOG_LEVEL:INFO}
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %-5level [%thread] %logger{36} - %msg%n"
