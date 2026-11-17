@@ -18,6 +18,11 @@ spec:
       containers:
         - name: orders-api
           image: 270254976774.dkr.ecr.eu-north-1.amazonaws.com/dhaba-orders-api:v1
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: postgres-secret
           ports:
             - containerPort: 8081
           resources:
