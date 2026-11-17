@@ -1,0 +1,274 @@
+
+name: Deploy Dhaba Production
+
+on:
+  workflow_run:
+    workflows: ["Deploy Dhaba Staging"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy-production:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+
+    environment:
+      name: production
+
+    steps:
+      - name: Deploy approved commit to production
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
+          AWS_ACCOUNT_ID: "270254976774"
+          AWS_REGION: eu-north-1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: IMAGE_TAG,AWS_ACCOUNT_ID,AWS_REGION
+          command_timeout: 30m
+          script: |
+            bash -s <<'DEPLOY'
+            set -euo pipefail
+
+            NAMESPACE=production
+            SOURCE_NAMESPACE=staging
+            REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+            DEPLOYMENTS=(web menu-api orders-api kitchen-worker stats-api stats-nginx)
+
+            declare -A REPOSITORIES=(
+              [web]=dhaba-web
+              [menu-api]=dhaba-menu-api
+              [orders-api]=dhaba-orders-api
+              [kitchen-worker]=dhaba-kitchen-worker
+              [stats-api]=dhaba-stats-api
+              [stats-nginx]=dhaba-stats-nginx
+            )
+
+            declare -A PREVIOUS_HASHES=()
+            declare -A PREVIOUS_REVISIONS=()
+            declare -A RELEASE_IMAGES=()
+
+            DEPLOY_DIR=""
+            CHANGES_STARTED=false
+            DEPLOY_SUCCEEDED=false
+            PF_PID=""
+            IMAGE_ENTRIES=""
+
+            fail() {
+              echo "::error::Production deployment failed: $1"
+              exit 1
+            }
+
+            template_hash() {
+              {
+                kubectl get deployment "$1" -n "$NAMESPACE" \
+                  -o jsonpath='{.spec.template}' 2>/dev/null || true
+              } | sha256sum | awk '{print $1}'
+            }
+
+            on_exit() {
+              EXIT_CODE=$?
+              set +e
+
+              if [[ "$CHANGES_STARTED" == true && "$DEPLOY_SUCCEEDED" != true ]]; then
+                echo "Production deployment failed. Starting rollback."
+
+                for deployment in "${DEPLOYMENTS[@]}"; do
+                  before_hash="${PREVIOUS_HASHES[$deployment]:-}"
+                  before_revision="${PREVIOUS_REVISIONS[$deployment]:-}"
+
+                  [[ -n "$before_revision" ]] || {
+                    echo "::warning::No previous revision for $deployment; skipping rollback."
+                    continue
+                  }
+
+                  after_hash=$(template_hash "$deployment")
+
+                  if [[ -n "$after_hash" && "$after_hash" != "$before_hash" ]]; then
+                    echo "Rolling back $deployment to revision $before_revision"
+
+                    kubectl rollout undo deployment/"$deployment" \
+                      -n "$NAMESPACE" \
+                      --to-revision="$before_revision" || {
+                        echo "::warning::Rollback of $deployment failed."
+                        continue
+                      }
+
+                    kubectl rollout status deployment/"$deployment" \
+                      -n "$NAMESPACE" --timeout=180s ||
+                      echo "::warning::$deployment did not become ready after rollback."
+                  fi
+                done
+              fi
+
+              if [[ -n "$PF_PID" ]]; then
+                kill "$PF_PID" 2>/dev/null || true
+              fi
+
+              if [[ -n "$DEPLOY_DIR" ]]; then
+                rm -rf "$DEPLOY_DIR"
+              fi
+
+              exit "$EXIT_CODE"
+            }
+
+            trap on_exit EXIT
+
+            # Verify cluster and namespace access.
+            kubectl get namespace "$SOURCE_NAMESPACE" >/dev/null ||
+              fail "Staging namespace unavailable"
+
+            kubectl get namespace "$NAMESPACE" >/dev/null ||
+              fail "Production namespace unavailable"
+
+            # Verify production database credentials.
+            for key in POSTGRES_USER POSTGRES_PASSWORD; do
+              value=$(kubectl get secret postgres-secret -n "$NAMESPACE" \
+                -o jsonpath="{.data.$key}" 2>/dev/null || true)
+
+              [[ -n "$value" ]] ||
+                fail "postgres-secret is missing $key in production"
+            done
+
+            # Extract the exact approved commit without modifying the repo.
+            cd "$HOME/Dhaba-dev" ||
+              fail "Repository not found"
+
+            git fetch origin main ||
+              fail "Could not fetch main"
+
+            git cat-file -e "${IMAGE_TAG}^{commit}" ||
+              fail "Approved commit $IMAGE_TAG does not exist locally"
+
+            DEPLOY_DIR=$(mktemp -d /tmp/dhaba-production-XXXXXX)
+
+            git archive "$IMAGE_TAG" k8s scripts |
+              tar -x -C "$DEPLOY_DIR" ||
+              fail "Could not extract approved commit"
+
+            # Refresh ECR credentials.
+            bash "$DEPLOY_DIR/scripts/refresh-ecr-secrets.sh" ||
+              fail "ECR credential refresh failed"
+
+            # Read the immutable release record created by staging.
+            RELEASE_NAME="release-$IMAGE_TAG"
+
+            kubectl get configmap "$RELEASE_NAME" \
+              -n "$SOURCE_NAMESPACE" >/dev/null ||
+              fail "Staging release record $RELEASE_NAME is missing"
+
+            # Read and validate all six exact image references.
+            for deployment in "${DEPLOYMENTS[@]}"; do
+              image=$(kubectl get configmap "$RELEASE_NAME" \
+                -n "$SOURCE_NAMESPACE" \
+                -o go-template="{{with index .data \"$deployment\"}}{{.}}{{end}}") ||
+                fail "Cannot read release image for $deployment"
+
+              [[ -n "$image" ]] ||
+                fail "Release image is missing for $deployment"
+
+              repository="${REPOSITORIES[$deployment]}"
+              expected_prefix="$REGISTRY/$repository:"
+
+              [[ "$image" == "$expected_prefix"* ]] ||
+                fail "Invalid registry or repository for $deployment: $image"
+
+              tag="${image#"$expected_prefix"}"
+
+              [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] ||
+                fail "Invalid image tag for $deployment: $tag"
+
+              RELEASE_IMAGES[$deployment]="$image"
+
+              IMAGE_ENTRIES+="  - name: $REGISTRY/$repository"$'\n'
+              IMAGE_ENTRIES+="    newName: ${image%:*}"$'\n'
+              IMAGE_ENTRIES+="    newTag: ${image##*:}"$'\n'
+
+              echo "$deployment: $image"
+            done
+
+            # Capture production state for rollback.
+            for deployment in "${DEPLOYMENTS[@]}"; do
+              PREVIOUS_HASHES[$deployment]=$(template_hash "$deployment")
+
+              PREVIOUS_REVISIONS[$deployment]=$(kubectl get deployment "$deployment" \
+                -n "$NAMESPACE" \
+                -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}' \
+                2>/dev/null || true)
+            done
+
+            # Generate temporary Kustomize wrapper.
+            mkdir -p "$DEPLOY_DIR/deploy"
+
+            cat > "$DEPLOY_DIR/deploy/kustomization.yaml" <<EOF
+            apiVersion: kustomize.config.k8s.io/v1beta1
+            kind: Kustomization
+            resources:
+              - ../k8s/overlays/production
+            images:
+            $IMAGE_ENTRIES
+            EOF
+
+            # Validate generated manifests before applying.
+            kubectl kustomize "$DEPLOY_DIR/deploy" \
+              > "$DEPLOY_DIR/rendered.yaml" ||
+              fail "Production Kustomize rendering failed"
+
+            # Apply production manifests.
+            CHANGES_STARTED=true
+
+            kubectl apply -f "$DEPLOY_DIR/rendered.yaml" ||
+              fail "Production manifest application failed"
+
+            # Wait for all application deployments.
+            for deployment in "${DEPLOYMENTS[@]}"; do
+              kubectl rollout status deployment/"$deployment" \
+                -n "$NAMESPACE" --timeout=180s ||
+                fail "Production rollout failed: $deployment"
+            done
+
+            # Smoke test production web service.
+            kubectl port-forward -n "$NAMESPACE" svc/web 18081:8080 \
+              > "$DEPLOY_DIR/port-forward.log" 2>&1 &
+            PF_PID=$!
+
+            READY=false
+
+            for i in {1..30}; do
+              if grep -q "Forwarding from" "$DEPLOY_DIR/port-forward.log"; then
+                READY=true
+                break
+              fi
+
+              kill -0 "$PF_PID" 2>/dev/null ||
+                fail "Production port-forward stopped"
+
+              sleep 1
+            done
+
+            [[ "$READY" == true ]] ||
+              fail "Production port-forward did not start"
+
+            curl --fail --silent --show-error \
+              --max-time 10 --retry 3 --retry-delay 3 \
+              http://127.0.0.1:18081/health ||
+              fail "Production smoke test failed"
+
+            echo
+
+            DEPLOY_SUCCEEDED=true
+
+            echo "Production deployment completed successfully."
+            echo "Deployed release: $RELEASE_NAME"
+
+            DEPLOY
