@@ -4,6 +4,9 @@
 # ==========================================
 FROM php:8.4-fpm-alpine AS php-base
 
+# DL3018: Alpine drops old package versions, so exact pins break future builds.
+# SC2086: $PHPIZE_DEPS is a space-separated package list and must be word-split.
+# hadolint ignore=DL3018,SC2086
 RUN apk add --no-cache postgresql-libs \
     && apk add --no-cache --virtual .build-deps $PHPIZE_DEPS postgresql-dev \
     && docker-php-ext-install pdo_pgsql opcache \
