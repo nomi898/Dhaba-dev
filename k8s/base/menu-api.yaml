@@ -15,6 +15,11 @@ spec:
       containers:
         - name: menu-api
           image: 270254976774.dkr.ecr.eu-north-1.amazonaws.com/dhaba-menu-api:v1
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: postgres-secret
           ports:
             - containerPort: 8000
           resources:
