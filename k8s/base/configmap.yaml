@@ -3,4 +3,8 @@ kind: ConfigMap
 metadata:
   name: app-config
 data:
-  POSTGRES_DB: dhaba
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "dhaba"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
