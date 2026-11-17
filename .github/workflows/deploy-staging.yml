@@ -1,4 +1,3 @@
-
 name: Deploy Dhaba Staging
 
 on:
@@ -9,6 +8,11 @@ on:
 
 permissions:
   contents: read
+
+# Never run two staging deployments at the same time.
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
 
 jobs:
   deploy-staging:
@@ -27,24 +31,17 @@ jobs:
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           envs: IMAGE_TAG,AWS_ACCOUNT_ID,AWS_REGION
+          command_timeout: 30m
           script: |
+            # Run under bash explicitly: the script uses associative arrays.
+            bash -s <<'DEPLOY'
             set -euo pipefail
 
-            cd ~/Dhaba-dev
-            git fetch origin main
-            git checkout "$IMAGE_TAG"
-
-            # Refresh ECR credentials
-            bash scripts/refresh-ecr-secrets.sh
-
+            NAMESPACE=staging
             REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-
-            # Deploy the base manifests
-            kubectl apply -k k8s/overlays/staging
-
-            # Update only images available for this commit.
-            # Otherwise, keep the currently configured image.
-            declare -A IMAGES=(
+            REPO_DIR="$HOME/Dhaba-dev"
+            DEPLOYMENTS=(web menu-api orders-api kitchen-worker stats-api stats-nginx)
+            declare -A REPOSITORIES=(
               [web]=dhaba-web
               [menu-api]=dhaba-menu-api
               [orders-api]=dhaba-orders-api
@@ -52,30 +49,186 @@ jobs:
               [stats-api]=dhaba-stats-api
               [stats-nginx]=dhaba-stats-nginx
             )
+            declare -A CURRENT_IMAGES=()
+            declare -A PREVIOUS_TEMPLATES=()
+            declare -A PREVIOUS_REVISIONS=()
+            WORK_DIR=""
+            PORT_FORWARD_PID=""
+            CHANGES_STARTED=false
+            DEPLOY_SUCCEEDED=false
 
-            for deployment in "${!IMAGES[@]}"; do
-              repository="${IMAGES[$deployment]}"
+            # Report a failure in the GitHub Actions log and stop. The EXIT
+            # handler then rolls back if the cluster was already changed.
+            fail() {
+              echo "::error::Staging deployment failed: $1"
+              exit 1
+            }
 
-              if aws ecr describe-images \
+            # Hash of a Deployment's Pod template. Only template changes start
+            # a new rollout, so this is what decides whether to roll back.
+            # A Deployment that does not exist hashes as an empty template.
+            template_hash() {
+              { kubectl get deployment "$1" -n "$NAMESPACE" \
+                  -o jsonpath='{.spec.template}' 2>/dev/null || true; } |
+                sha256sum | cut -d' ' -f1
+            }
+
+            # Undo only the Deployments whose Pod template this run changed,
+            # back to the exact revision that was running before.
+            rollback() {
+              echo "Rolling back Deployments changed by this run..."
+
+              for deployment in "${DEPLOYMENTS[@]}"; do
+                before_revision="${PREVIOUS_REVISIONS[$deployment]:-}"
+
+                if [[ "$(template_hash "$deployment")" == "${PREVIOUS_TEMPLATES[$deployment]}" ]]; then
+                  continue
+                fi
+
+                if [[ -z "$before_revision" ]]; then
+                  echo "::warning::$deployment was created by this run; no earlier revision to restore."
+                  continue
+                fi
+
+                echo "Rolling back $deployment to revision $before_revision"
+                kubectl rollout undo deployment/"$deployment" -n "$NAMESPACE" \
+                  --to-revision="$before_revision" ||
+                  echo "::warning::Rollback of $deployment failed."
+                kubectl rollout status deployment/"$deployment" -n "$NAMESPACE" \
+                  --timeout=180s ||
+                  echo "::warning::$deployment did not become ready after rollback."
+              done
+            }
+
+            # Runs on every exit, success or failure: stops the port-forward,
+            # rolls back if the deployment did not finish, removes temp files.
+            on_exit() {
+              local status=$?
+              set +e
+
+              if [[ -n "$PORT_FORWARD_PID" ]]; then
+                kill "$PORT_FORWARD_PID" 2>/dev/null
+              fi
+
+              if [[ "$CHANGES_STARTED" == true && "$DEPLOY_SUCCEEDED" != true ]]; then
+                rollback
+              fi
+
+              if [[ -n "$WORK_DIR" ]]; then
+                rm -rf "$WORK_DIR"
+              fi
+
+              exit "$status"
+            }
+            trap on_exit EXIT
+
+            WORK_DIR=$(mktemp -d /tmp/dhaba-deploy-staging-XXXXXX)
+
+            # Take the manifests and scripts from the exact build commit
+            # without changing the EC2 checkout, which stays on main.
+            cd "$REPO_DIR" || fail "repository not found at $REPO_DIR"
+            git fetch --quiet origin main || fail "git fetch from origin failed"
+            git cat-file -e "${IMAGE_TAG}^{commit}" 2>/dev/null ||
+              fail "commit $IMAGE_TAG was not found after fetching origin/main"
+            git archive "$IMAGE_TAG" k8s scripts | tar -x -C "$WORK_DIR" ||
+              fail "could not extract k8s/ and scripts/ from $IMAGE_TAG"
+
+            kubectl get namespace "$NAMESPACE" >/dev/null ||
+              fail "cannot reach the cluster, or namespace $NAMESPACE does not exist"
+
+            bash "$WORK_DIR/scripts/refresh-ecr-secrets.sh" ||
+              fail "ECR pull-secret refresh failed (check the EC2 AWS credentials and that both namespaces exist)"
+
+            # Record what is running now, before anything changes.
+            for deployment in "${DEPLOYMENTS[@]}"; do
+              CURRENT_IMAGES[$deployment]=$(kubectl get deployment "$deployment" -n "$NAMESPACE" \
+                -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+              PREVIOUS_TEMPLATES[$deployment]=$(template_hash "$deployment")
+              PREVIOUS_REVISIONS[$deployment]=$(kubectl get deployment "$deployment" -n "$NAMESPACE" \
+                -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}' 2>/dev/null || true)
+            done
+
+            # Choose an image per Deployment: the new SHA image if this build
+            # produced one, otherwise the image already running. A Deployment
+            # that does not exist yet keeps the image from the manifests.
+            IMAGE_ENTRIES=""
+            for deployment in "${DEPLOYMENTS[@]}"; do
+              repository="${REPOSITORIES[$deployment]}"
+              manifest_name="$REGISTRY/$repository"
+
+              if ecr_output=$(aws ecr describe-images \
                 --repository-name "$repository" \
                 --image-ids imageTag="$IMAGE_TAG" \
-                --region "$AWS_REGION" >/dev/null 2>&1; then
-
-                image="$REGISTRY/$repository:$IMAGE_TAG"
-
-                kubectl set image \
-                  deployment/"$deployment" \
-                  "$deployment=$image" \
-                  -n staging
+                --region "$AWS_REGION" 2>&1); then
+                image="$manifest_name:$IMAGE_TAG"
+                echo "$deployment: deploying new image $image"
+              elif ! grep -q ImageNotFoundException <<< "$ecr_output"; then
+                fail "ECR lookup for $repository failed: $ecr_output"
+              elif [[ -n "${CURRENT_IMAGES[$deployment]}" ]]; then
+                image="${CURRENT_IMAGES[$deployment]}"
+                echo "$deployment: no new image; keeping $image"
               else
-                echo "No new image for $deployment; keeping current image."
+                echo "$deployment: first deployment; using the manifest image"
+                continue
               fi
+
+              IMAGE_ENTRIES+="  - name: $manifest_name"$'\n'
+              IMAGE_ENTRIES+="    newName: ${image%:*}"$'\n'
+              IMAGE_ENTRIES+="    newTag: ${image##*:}"$'\n'
             done
 
-            # Wait for all application deployments
-            for deployment in web menu-api orders-api kitchen-worker stats-api stats-nginx; do
+            # Render the staging overlay with the chosen images, so each
+            # Deployment rolls out once and never passes through the
+            # manifest's default tag.
+            mkdir "$WORK_DIR/deploy"
+            {
+              echo "apiVersion: kustomize.config.k8s.io/v1beta1"
+              echo "kind: Kustomization"
+              echo "resources:"
+              echo "  - ../k8s/overlays/staging"
+              if [[ -n "$IMAGE_ENTRIES" ]]; then
+                echo "images:"
+                printf '%s' "$IMAGE_ENTRIES"
+              fi
+            } > "$WORK_DIR/deploy/kustomization.yaml"
+
+            kubectl kustomize "$WORK_DIR/deploy" > "$WORK_DIR/rendered.yaml" ||
+              fail "rendering the staging manifests failed"
+
+            # From here on, a failure rolls back the changed Deployments.
+            CHANGES_STARTED=true
+            kubectl apply -f "$WORK_DIR/rendered.yaml" ||
+              fail "kubectl apply failed"
+
+            for deployment in "${DEPLOYMENTS[@]}"; do
               kubectl rollout status deployment/"$deployment" \
-                -n staging --timeout=180s
+                -n "$NAMESPACE" --timeout=180s ||
+                fail "rollout of $deployment did not complete within 180s"
             done
 
+            # Smoke test: web's /health endpoint, reached through its Service.
+            kubectl port-forward -n "$NAMESPACE" svc/web 18080:8080 \
+              > "$WORK_DIR/port-forward.log" 2>&1 &
+            PORT_FORWARD_PID=$!
+
+            for _ in $(seq 1 30); do
+              if grep -q "Forwarding from" "$WORK_DIR/port-forward.log"; then
+                break
+              fi
+              if ! kill -0 "$PORT_FORWARD_PID" 2>/dev/null; then
+                fail "port-forward to svc/web exited: $(cat "$WORK_DIR/port-forward.log")"
+              fi
+              sleep 1
+            done
+            grep -q "Forwarding from" "$WORK_DIR/port-forward.log" ||
+              fail "port-forward to svc/web was not ready after 30s"
+
+            curl --fail --silent --show-error --max-time 10 \
+              --retry 3 --retry-delay 2 \
+              http://127.0.0.1:18080/health ||
+              fail "smoke test failed: web /health did not return 200"
+            echo
+
+            DEPLOY_SUCCEEDED=true
             echo "Staging deployment completed."
+            DEPLOY
