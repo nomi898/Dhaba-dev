@@ -12,6 +12,7 @@ spec:
       labels:
         app: web
     spec:
+      enableServiceLinks: false
       containers:
         - name: web
           image: 270254976774.dkr.ecr.eu-north-1.amazonaws.com/dhaba-web:v1

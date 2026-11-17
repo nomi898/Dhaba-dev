@@ -12,6 +12,7 @@ spec:
       labels:
         app: stats-api
     spec:
+      enableServiceLinks: false
       containers:
         - name: stats-api
           image: 270254976774.dkr.ecr.eu-north-1.amazonaws.com/dhaba-stats-api:v1
@@ -59,6 +60,7 @@ spec:
       labels:
         app: stats-nginx
     spec:
+      enableServiceLinks: false
       containers:
         - name: stats-nginx
           image: 270254976774.dkr.ecr.eu-north-1.amazonaws.com/dhaba-stats-nginx:v2

@@ -12,6 +12,7 @@ spec:
       labels:
         app: menu-api
     spec:
+      enableServiceLinks: false
       containers:
         - name: menu-api
           image: 270254976774.dkr.ecr.eu-north-1.amazonaws.com/dhaba-menu-api:v1
