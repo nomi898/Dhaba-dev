@@ -15,6 +15,13 @@ spec:
       containers:
         - name: web
           image: 270254976774.dkr.ecr.eu-north-1.amazonaws.com/dhaba-web:v1
+          env:
+            - name: MENU_API_URL
+              value: "http://menu-api:8000"
+            - name: ORDERS_API_URL
+              value: "http://orders-api:8081"
+            - name: STATS_API_URL
+              value: "http://stats-nginx:8080"
           ports:
             - containerPort: 8080
           resources:
