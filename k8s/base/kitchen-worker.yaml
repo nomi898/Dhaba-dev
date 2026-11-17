@@ -13,6 +13,8 @@ spec:
         app: kitchen-worker
     spec:
       enableServiceLinks: false
+      imagePullSecrets:
+        - name: ecr-pull-secret
       containers:
         - name: kitchen-worker
           image: 270254976774.dkr.ecr.eu-north-1.amazonaws.com/dhaba-kitchen-worker:v1

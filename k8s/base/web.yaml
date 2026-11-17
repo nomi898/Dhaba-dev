@@ -13,6 +13,8 @@ spec:
         app: web
     spec:
       enableServiceLinks: false
+      imagePullSecrets:
+        - name: ecr-pull-secret
       containers:
         - name: web
           image: 270254976774.dkr.ecr.eu-north-1.amazonaws.com/dhaba-web:v1
