@@ -10,7 +10,6 @@ on:
 permissions:
   contents: read
 
-# Never run two staging deployments at the same time.
 concurrency:
   group: deploy-staging
   cancel-in-progress: false
@@ -34,7 +33,6 @@ jobs:
           envs: IMAGE_TAG,AWS_ACCOUNT_ID,AWS_REGION
           command_timeout: 30m
           script: |
-            # Run under bash explicitly: the script uses associative arrays.
             bash -s <<'DEPLOY'
             set -euo pipefail
 
@@ -62,13 +60,11 @@ jobs:
             CHANGES_STARTED=false
             DEPLOY_SUCCEEDED=false
 
-            # Report a failure and stop.
             fail() {
               echo "::error::Staging deployment failed: $1"
               exit 1
             }
 
-            # Hash a Deployment's Pod template.
             template_hash() {
               {
                 kubectl get deployment "$1" -n "$NAMESPACE" \
@@ -76,7 +72,6 @@ jobs:
               } | sha256sum | cut -d' ' -f1
             }
 
-            # Roll back only Deployments changed by this run.
             rollback() {
               echo "Rolling back Deployments changed by this run..."
 
@@ -104,7 +99,6 @@ jobs:
               done
             }
 
-            # Cleanup and rollback handler.
             on_exit() {
               local status=$?
               set +e
@@ -143,7 +137,7 @@ jobs:
             kubectl get namespace "$NAMESPACE" >/dev/null ||
               fail "cannot reach the cluster, or namespace $NAMESPACE does not exist"
 
-            # PostgreSQL and Menu API need these credentials.
+            # Verify PostgreSQL credentials.
             for key in POSTGRES_USER POSTGRES_PASSWORD; do
               value=$(kubectl get secret postgres-secret -n "$NAMESPACE" \
                 -o jsonpath="{.data.$key}" 2>/dev/null || true)
@@ -154,9 +148,9 @@ jobs:
 
             # Refresh ECR pull credentials.
             bash "$WORK_DIR/scripts/refresh-ecr-secrets.sh" ||
-              fail "ECR pull-secret refresh failed (check EC2 AWS credentials and namespaces)"
+              fail "ECR pull-secret refresh failed"
 
-            # Record the current deployment state.
+            # Capture the current deployment state.
             for deployment in "${DEPLOYMENTS[@]}"; do
               CURRENT_IMAGES[$deployment]=$(kubectl get deployment "$deployment" -n "$NAMESPACE" \
                 -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
@@ -167,8 +161,8 @@ jobs:
                 -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}' 2>/dev/null || true)
             done
 
-            # Choose a new SHA image when available.
-            # Otherwise keep the image currently running.
+            # Use the new SHA image when available.
+            # Otherwise retain the image currently running.
             IMAGE_ENTRIES=""
 
             for deployment in "${DEPLOYMENTS[@]}"; do
@@ -231,36 +225,43 @@ jobs:
                 fail "rollout of $deployment did not complete within 180s"
             done
 
-            # Smoke test the web health endpoint.
-            kubectl port-forward -n "$NAMESPACE" svc/web 18080:8080 \
+            # Smoke test using a dynamically allocated local port.
+            kubectl port-forward -n "$NAMESPACE" svc/web :8080 \
               > "$WORK_DIR/port-forward.log" 2>&1 &
             PORT_FORWARD_PID=$!
 
+            SMOKE_PORT=""
+
             for _ in $(seq 1 30); do
-              if grep -q "Forwarding from" "$WORK_DIR/port-forward.log"; then
+              SMOKE_PORT=$(sed -nE \
+                's/.*Forwarding from 127\.0\.0\.1:([0-9]+) -> 8080.*/\1/p' \
+                "$WORK_DIR/port-forward.log" | head -n 1)
+
+              if [[ -n "$SMOKE_PORT" ]]; then
                 break
               fi
 
               if ! kill -0 "$PORT_FORWARD_PID" 2>/dev/null; then
-                fail "port-forward to svc/web exited: $(cat "$WORK_DIR/port-forward.log")"
+                fail "port-forward exited: $(cat "$WORK_DIR/port-forward.log")"
               fi
 
               sleep 1
             done
 
-            grep -q "Forwarding from" "$WORK_DIR/port-forward.log" ||
-              fail "port-forward to svc/web was not ready after 30s"
+            [[ -n "$SMOKE_PORT" ]] ||
+              fail "port-forward did not become ready within 30 seconds"
+
+            echo "Smoke test using local port $SMOKE_PORT"
 
             curl --fail --silent --show-error --max-time 10 \
               --retry 3 --retry-delay 2 \
-              http://127.0.0.1:18080/health ||
+              "http://127.0.0.1:$SMOKE_PORT/health" ||
               fail "smoke test failed: web /health did not return 200"
 
             echo
-
             echo "Staging smoke test passed."
 
-            # Record the exact images running in staging for this commit.
+            # Record the exact images running in staging.
             RELEASE_NAME="release-$IMAGE_TAG"
             declare -A DEPLOYED_IMAGES=()
 
@@ -270,20 +271,19 @@ jobs:
 
               image=$(kubectl get deployment "$deployment" -n "$NAMESPACE" \
                 -o jsonpath='{.spec.template.spec.containers[0].image}') ||
-                fail "cannot read the deployed image of $deployment for the release record"
+                fail "cannot read deployed image of $deployment"
 
               tag="${image#"$prefix"}"
 
-              # Validate the complete image reference and tag.
               if [[ "$image" != "$prefix"* ]] ||
                 ! [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
-                fail "$deployment runs '$image', which is not a full ${prefix}<tag> reference"
+                fail "$deployment runs '$image', which is not a valid full image reference"
               fi
 
               DEPLOYED_IMAGES[$deployment]="$image"
             done
 
-            # If this commit already has a record, verify it is identical.
+            # Verify an existing record or create a new immutable record.
             if kubectl get configmap "$RELEASE_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
 
               for deployment in "${DEPLOYMENTS[@]}"; do
@@ -291,7 +291,7 @@ jobs:
                   -o go-template="{{with index .data \"$deployment\"}}{{.}}{{end}}")
 
                 [[ "$recorded" == "${DEPLOYED_IMAGES[$deployment]}" ]] ||
-                  fail "$RELEASE_NAME already records $deployment as '$recorded', but staging now runs '${DEPLOYED_IMAGES[$deployment]}'"
+                  fail "$RELEASE_NAME already records a different image for $deployment"
               done
 
               echo "Release record $RELEASE_NAME already exists and matches."
@@ -319,14 +319,9 @@ jobs:
               kubectl create -f "$WORK_DIR/release.yaml" ||
                 fail "could not create release record $RELEASE_NAME"
 
-              echo "Recorded release $RELEASE_NAME:"
-
-              for deployment in "${DEPLOYMENTS[@]}"; do
-                echo "  $deployment: ${DEPLOYED_IMAGES[$deployment]}"
-              done
+              echo "Created release record $RELEASE_NAME"
             fi
 
-            # Only mark success after the release record is confirmed.
             DEPLOY_SUCCEEDED=true
 
             echo "Staging deployment and release record completed successfully."
