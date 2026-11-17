@@ -1,16 +1,13 @@
 
 services:
-
   # 1. PostgreSQL Database
   postgres:
-    image: postgres:16
+    image: postgres:16-alpine
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-dhaba}
       POSTGRES_USER: ${POSTGRES_USER:-dhaba}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./database/postgres:/docker-entrypoint-initdb.d:ro
@@ -27,8 +24,6 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -46,8 +41,18 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
-      DATABASE_URL: ${MENU_DATABASE_URL}
-      REDIS_URL: ${MENU_REDIS_URL:-redis://redis:6379/0}
+      APP_VERSION: ${APP_VERSION:-1.0.0}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-dhaba}
+      POSTGRES_USER: ${POSTGRES_USER:-dhaba}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
+      MENU_CACHE_TTL_SECONDS: ${MENU_CACHE_TTL_SECONDS:-300}
     ports:
       - "8000:8000"
     depends_on:
@@ -72,6 +77,8 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
     ports:
       - "8081:8081"
     depends_on:
@@ -89,11 +96,21 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-dhaba}
-      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-dhaba}
-      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-dhaba}
+      POSTGRES_USER: ${POSTGRES_USER:-dhaba}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
+      WORKER_HEARTBEAT_FILE: /tmp/kitchen-worker-heartbeat
+      KITCHEN_AUTO_ADVANCE: ${KITCHEN_AUTO_ADVANCE:-true}
+      KITCHEN_ACCEPT_DELAY: ${KITCHEN_ACCEPT_DELAY:-5s}
+      KITCHEN_COOK_TIME: ${KITCHEN_COOK_TIME:-20s}
+      WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-5}
+      APP_VERSION: ${APP_VERSION:-1.0.0}
     depends_on:
       postgres:
         condition: service_healthy
@@ -102,7 +119,7 @@ services:
     networks:
       - dhaba-network
 
-  # 6. Statistics API - PHP / Laravel
+  # 6. Statistics API - Laravel / PHP-FPM
   stats-api:
     build:
       context: ./stats-api
@@ -111,33 +128,44 @@ services:
     environment:
       APP_ENV: production
       APP_DEBUG: "false"
-      APP_KEY: ${LARAVEL_APP_KEY}
+      APP_KEY: ${LARAVEL_APP_KEY:?Set LARAVEL_APP_KEY in .env}
       DB_CONNECTION: pgsql
       DB_HOST: postgres
       DB_PORT: 5432
       DB_DATABASE: ${POSTGRES_DB:-dhaba}
       DB_USERNAME: ${POSTGRES_USER:-dhaba}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
-    ports:
-      - "8082:8082"
     depends_on:
       postgres:
         condition: service_healthy
     networks:
       - dhaba-network
 
-  # 7. Frontend - React / Nginx
+  # 7. Stats API Nginx
+  stats-nginx:
+    build:
+      context: ./stats-api
+      dockerfile: Dockerfile.nginx
+    restart: unless-stopped
+    ports:
+      - "8082:8080"
+    depends_on:
+      - stats-api
+    networks:
+      - dhaba-network
+
+  # 8. Frontend - React / Nginx
   web:
     build:
       context: ./web
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "80:8080"
     depends_on:
       - menu-api
       - orders-api
-      - stats-api
+      - stats-nginx
     networks:
       - dhaba-network
 
