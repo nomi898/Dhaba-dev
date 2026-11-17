@@ -144,11 +144,12 @@ jobs:
 
       - name: Hadolint
         run: |
-          find . -type f -iname 'Dockerfile*' -print0 |
+          status=0
           while IFS= read -r -d '' file; do
             echo "Checking $file"
-            docker run --rm -i hadolint/hadolint:v2.12.0 < "$file"
-          done
+            docker run --rm -i hadolint/hadolint:v2.12.0 < "$file" || status=1
+          done < <(find . -type f -iname 'Dockerfile*' -print0)
+          exit "$status"
 
   # Shell scripts: ShellCheck
   shell-scripts:
