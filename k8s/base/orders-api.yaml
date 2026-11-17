@@ -13,6 +13,8 @@ spec:
         app: orders-api
     spec:
       enableServiceLinks: false
+      imagePullSecrets:
+        - name: ecr-pull-secret
       containers:
         - name: orders-api
           image: 270254976774.dkr.ecr.eu-north-1.amazonaws.com/dhaba-orders-api:v1
