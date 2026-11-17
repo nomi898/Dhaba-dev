@@ -13,6 +13,6 @@ patches:
       kind: Ingress
       name: dhaba-ingress
     patch: |-
-      - op: replace
-        path: /spec/rules/0/host
-        value: staging.dhaba.test
+      # Keep only the staging host (rule 1); drop the production host.
+      - op: remove
+        path: /spec/rules/0
