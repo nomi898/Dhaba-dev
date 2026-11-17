@@ -1,0 +1,81 @@
+
+name: Deploy Dhaba Staging
+
+on:
+  workflow_run:
+    workflows: ["Build and Push Images to ECR"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-staging:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to EC2 staging
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
+          AWS_ACCOUNT_ID: "270254976774"
+          AWS_REGION: eu-north-1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: IMAGE_TAG,AWS_ACCOUNT_ID,AWS_REGION
+          script: |
+            set -euo pipefail
+
+            cd ~/Dhaba-dev
+            git fetch origin main
+            git checkout "$IMAGE_TAG"
+
+            # Refresh ECR credentials
+            bash scripts/refresh-ecr-secrets.sh
+
+            REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+            # Deploy the base manifests
+            kubectl apply -k k8s/overlays/staging
+
+            # Update only images available for this commit.
+            # Otherwise, keep the currently configured image.
+            declare -A IMAGES=(
+              [web]=dhaba-web
+              [menu-api]=dhaba-menu-api
+              [orders-api]=dhaba-orders-api
+              [kitchen-worker]=dhaba-kitchen-worker
+              [stats-api]=dhaba-stats-api
+              [stats-nginx]=dhaba-stats-nginx
+            )
+
+            for deployment in "${!IMAGES[@]}"; do
+              repository="${IMAGES[$deployment]}"
+
+              if aws ecr describe-images \
+                --repository-name "$repository" \
+                --image-ids imageTag="$IMAGE_TAG" \
+                --region "$AWS_REGION" >/dev/null 2>&1; then
+
+                image="$REGISTRY/$repository:$IMAGE_TAG"
+
+                kubectl set image \
+                  deployment/"$deployment" \
+                  "$deployment=$image" \
+                  -n staging
+              else
+                echo "No new image for $deployment; keeping current image."
+              fi
+            done
+
+            # Wait for all application deployments
+            for deployment in web menu-api orders-api kitchen-worker stats-api stats-nginx; do
+              kubectl rollout status deployment/"$deployment" \
+                -n staging --timeout=180s
+            done
+
+            echo "Staging deployment completed."

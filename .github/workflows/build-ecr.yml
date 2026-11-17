@@ -76,6 +76,7 @@ jobs:
           [[ "$ORDERS" == "true" ]] && add_service orders-api ./orders-api ./orders-api/Dockerfile dhaba-orders-api
           [[ "$KITCHEN" == "true" ]] && add_service kitchen-worker ./kitchen-worker ./kitchen-worker/Dockerfile dhaba-kitchen-worker
           [[ "$STATS" == "true" ]] && add_service stats-api ./stats-api ./stats-api/Dockerfile dhaba-stats-api
+          [[ "$STATS" == "true" ]] && add_service stats-nginx ./stats-api ./stats-api/Dockerfile.nginx dhaba-stats-nginx
 
           echo "value=$MATRIX" >> "$GITHUB_OUTPUT"
           echo "Selected services: $MATRIX"
