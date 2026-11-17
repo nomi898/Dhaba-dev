@@ -177,13 +177,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate manifests
+      - name: Install Kustomize
         run: |
-          if [ -d k8s ]; then
-            docker run --rm \
-              -v "$PWD:/work" \
-              ghcr.io/yannh/kubeconform:v0.6.7 \
-              -summary -recursive /work/k8s
-          else
-            echo "k8s directory does not exist yet. Skipping."
-          fi
+          curl -sSLo /tmp/kustomize.tar.gz \
+            https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.7.1/kustomize_v5.7.1_linux_amd64.tar.gz
+          tar -xzf /tmp/kustomize.tar.gz -C /tmp
+          sudo install /tmp/kustomize /usr/local/bin/kustomize
+
+      # kubeconform runs from its container image, so rendered output goes to
+      # a directory that is mounted into the container.
+      - name: Validate staging manifests
+        run: |
+          mkdir -p rendered
+          kustomize build k8s/overlays/staging > rendered/staging.yaml
+          docker run --rm -v "$PWD/rendered:/work" \
+            ghcr.io/yannh/kubeconform:v0.6.7 \
+            -strict -summary /work/staging.yaml
+
+      - name: Validate production manifests
+        run: |
+          mkdir -p rendered
+          kustomize build k8s/overlays/production > rendered/production.yaml
+          docker run --rm -v "$PWD/rendered:/work" \
+            ghcr.io/yannh/kubeconform:v0.6.7 \
+            -strict -summary /work/production.yaml
