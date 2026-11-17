@@ -34,5 +34,3 @@ export default function App() {
     </div>
   );
 }
-
-const unusedTestVariable = "CI failure test";
