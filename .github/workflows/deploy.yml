@@ -1,0 +1,23 @@
+
+name: Pull Latest Code on EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  update-ec2:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Connect to EC2 and pull changes
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd ~/Dhaba-dev
+            git pull origin main
+            echo "Latest code pulled successfully"
