@@ -18,6 +18,11 @@ spec:
       containers:
         - name: kitchen-worker
           image: 270254976774.dkr.ecr.eu-north-1.amazonaws.com/dhaba-kitchen-worker:v1
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: postgres-secret
           resources:
             requests:
               cpu: 100m
