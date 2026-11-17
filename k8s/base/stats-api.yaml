@@ -61,7 +61,7 @@ spec:
     spec:
       containers:
         - name: stats-nginx
-          image: 270254976774.dkr.ecr.eu-north-1.amazonaws.com/dhaba-stats-nginx:v1
+          image: 270254976774.dkr.ecr.eu-north-1.amazonaws.com/dhaba-stats-nginx:v2
           ports:
             - containerPort: 8080
           resources:
