@@ -8,6 +8,27 @@ spec:
     - host: devopsnktask.duckdns.org
       http:
         paths:
+          - path: /api/menu
+            pathType: Prefix
+            backend:
+              service:
+                name: menu-api
+                port:
+                  number: 8000
+          - path: /api/orders
+            pathType: Prefix
+            backend:
+              service:
+                name: orders-api
+                port:
+                  number: 8081
+          - path: /api/stats
+            pathType: Prefix
+            backend:
+              service:
+                name: stats-nginx
+                port:
+                  number: 8080
           - path: /
             pathType: Prefix
             backend:
@@ -19,6 +40,27 @@ spec:
     - host: devopsnktask-staging.duckdns.org
       http:
         paths:
+          - path: /api/menu
+            pathType: Prefix
+            backend:
+              service:
+                name: menu-api
+                port:
+                  number: 8000
+          - path: /api/orders
+            pathType: Prefix
+            backend:
+              service:
+                name: orders-api
+                port:
+                  number: 8081
+          - path: /api/stats
+            pathType: Prefix
+            backend:
+              service:
+                name: stats-nginx
+                port:
+                  number: 8080
           - path: /
             pathType: Prefix
             backend:
