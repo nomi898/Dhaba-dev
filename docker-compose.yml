@@ -162,6 +162,10 @@ services:
     restart: unless-stopped
     ports:
       - "80:8080"
+    environment:
+      MENU_API_URL: http://menu-api:8000
+      ORDERS_API_URL: http://orders-api:8081
+      STATS_API_URL: http://stats-nginx:8080
     depends_on:
       - menu-api
       - orders-api
