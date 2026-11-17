@@ -4,8 +4,10 @@
 # ==========================================
 FROM php:8.4-fpm-alpine AS php-base
 
-RUN docker-php-ext-install opcache
-
+RUN apk add --no-cache postgresql-libs \
+    && apk add --no-cache --virtual .build-deps $PHPIZE_DEPS postgresql-dev \
+    && docker-php-ext-install pdo_pgsql opcache \
+    && apk del .build-deps
 
 # ==========================================
 # Stage 2: Install Composer dependencies
