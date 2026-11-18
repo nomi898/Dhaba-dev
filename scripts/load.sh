@@ -39,6 +39,8 @@ echo "================================"
 
 START_TIME=$(date +%s)
 
+# $1/$2 are expanded by the inner sh, not here.
+# shellcheck disable=SC2016
 seq "$REQUESTS" | xargs -P "$CONCURRENCY" -I {} \
     sh -c '
         curl -sS \
