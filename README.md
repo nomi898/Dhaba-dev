@@ -1,93 +1,280 @@
-## C9 – Automatic ECR Image Pull Secret Refresh
+# Dhaba – DevOps Deployment Project
 
-### Overview
+## 1. Project Overview
 
-Amazon Elastic Container Registry (ECR) uses temporary authentication tokens to allow Kubernetes Pods to pull private Docker images.
+Dhaba is a containerized application deployed using Docker, Amazon ECR, Kubernetes, GitHub Actions, and AWS EC2.
 
-These authentication tokens are valid for approximately **12 hours**. If the token expires, Kubernetes may fail to pull images from ECR, resulting in `ImagePullBackOff` errors.
+The project implements automated image builds, staging and production deployments, controlled access, rollback procedures, load testing, and operational health checks.
 
-To prevent this, Dhaba implements an automated Kubernetes CronJob that refreshes ECR credentials every 6 hours.
+### Project Scope
 
-### Architecture
+- C9 – Automatic ECR credential refresh
+- C10 – Restricted Kubernetes deployment permissions
+- C11 – Automated staging deployment
+- C12 – Production deployment with approval
+- C13 – Manual rollback and Slack notifications
+- C14 – Load testing
+- C15 – Cluster, service, and database health checks
 
-The refresh process works as follows:
+C16 and C17 are outside the agreed project scope and are not included.
 
-1. Kubernetes CronJob runs every 6 hours in the `ops` namespace.
-2. A Job creates a temporary Pod using the `amazon/aws-cli` image.
-3. The Pod accesses the EC2 instance's IAM role through the EC2 Instance Metadata Service (IMDSv2).
-4. AWS CLI obtains a temporary ECR authentication token.
-5. The refresh script communicates with the Kubernetes API.
-6. The script updates the existing `ecr-pull-secret` in both `staging` and `production` namespaces.
-7. Kubernetes uses the refreshed credentials when pulling private images from ECR.
+---
 
-### Configuration
+## 2. Infrastructure
 
-**CronJob details**
+### AWS Infrastructure
 
-| Setting | Value |
+| Component | Configuration |
 |---|---|
-| CronJob name | `ecr-secret-refresh` |
-| Namespace | `ops` |
-| Schedule | `0 */6 * * *` |
-| Container image | `amazon/aws-cli:latest` |
-| AWS Region | `eu-north-1` |
-| AWS Authentication | EC2 IAM Role |
-| Authentication method | IMDSv2 |
-| Target namespaces | `staging`, `production` |
-| Secret name | `ecr-pull-secret` |
+| Cloud provider | AWS |
+| Region | eu-north-1 |
+| EC2 public IP | 51.20.193.202 |
+| EC2 instance | i-0874e3bb71b14318a |
+| Operating system | Ubuntu |
+| Kubernetes | Minikube |
+| Container runtime | containerd |
+| Kubernetes version | v1.37.0 |
+| Deployment user | dhaba-deploy |
 
-The CronJob uses `hostNetwork: true` and `dnsPolicy: ClusterFirstWithHostNet` to access the EC2 metadata service from the Pod.
+### Kubernetes Cluster
 
-### IAM Authentication
+The Minikube cluster runs three nodes on the EC2 host.
 
-The CronJob uses the EC2 IAM role:
+| Node | Internal IP | Role |
+|---|---|---|
+| minikube | 192.168.49.2 | Control plane |
+| minikube-m02 | 192.168.49.3 | Worker |
+| minikube-m03 | 192.168.49.4 | Worker |
 
-`DhabaEC2ECRRole`
+**Important:** These are three Minikube nodes hosted on one EC2 instance. They do not represent three independent EC2 machines.
 
-This role provides the permissions required to authenticate with Amazon ECR.
+### Kubernetes Namespaces
 
-The implementation does not store permanent AWS access keys or secret access keys inside Kubernetes Secrets or environment variables.
+| Namespace | Purpose |
+|---|---|
+| ops | Operational resources and ECR credential refresh |
+| staging | Testing application releases |
+| production | Production application |
 
-Instead, it obtains temporary credentials through IMDSv2.
+---
 
-### Kubernetes RBAC
+## 3. Application Architecture
 
-A dedicated ServiceAccount named `ecr-secret-refresher` runs the refresh process in the `ops` namespace.
+### Application Components
 
-It has restricted permissions through Kubernetes Roles and RoleBindings.
+The application contains six main workloads:
 
-Its permissions are limited to:
+1. web
+2. menu-api
+3. orders-api
+4. kitchen-worker
+5. stats-api
+6. stats-nginx
 
-- Accessing the `ecr-pull-secret` Secret in the `staging` namespace.
-- Updating and patching that Secret.
-- Accessing the `ecr-pull-secret` Secret in the `production` namespace.
-- Updating and patching that Secret.
+Supporting infrastructure:
 
-It does not require cluster-admin permissions.
+- PostgreSQL – StatefulSet
+- Redis – StatefulSet
 
-### Deployment Pipeline Integration
+The kitchen-worker is a background worker and does not require a Kubernetes Service.
 
-The staging and production GitHub Actions workflows trigger the ECR refresh CronJob manually before deploying application workloads.
+### Container Registry
 
-They create a Job from the existing CronJob:
+Amazon Elastic Container Registry (ECR) stores the application images.
 
-```bash
-kubectl create job "$JOB_NAME" \
-  --from=cronjob/ecr-secret-refresh \
-  -n ops
+Repositories:
+
+- dhaba-web
+- dhaba-menu-api
+- dhaba-orders-api
+- dhaba-kitchen-worker
+- dhaba-stats-api
+- dhaba-stats-nginx
+
+AWS account ID: 270254976774
+
+AWS region: eu-north-1
+
+ECR registry:
+
+`270254976774.dkr.ecr.eu-north-1.amazonaws.com`
+
+---
+
+## 4. Domain Configuration
+
+Two DuckDNS domains are configured.
+
+| Environment | Domain |
+|---|---|
+| Production | devopsnktask.duckdns.org |
+| Staging | devopsnktask-staging.duckdns.org |
+
+Both domains resolve to:
+
+`51.20.193.202`
+
+### Traffic Flow
+
+```text
+                Internet
+                    |
+                    |
+              DuckDNS Domains
+                    |
+                    v
+              AWS EC2 Server
+              51.20.193.202
+                    |
+                    v
+                Nginx :80
+                    |
+                    v
+          Minikube Ingress NodePort
+                 :31742
+                    |
+                    v
+              Kubernetes Ingress
+                    |
+          +---------+---------+
+          |                   |
+          v                   v
+      Production            Staging
+      Namespace             Namespace
+          |                   |
+          v                   v
+       Web Service         Web Service
+          |                   |
+          v                   v
+       Web Pods             Web Pods
 ```
 
-The workflows wait for the Job to complete successfully before continuing with deployment.
+Nginx uses the HTTP Host header to forward both domains to the Kubernetes Ingress.
 
-This ensures that the ECR credentials are refreshed before Kubernetes attempts to pull the new application images.
+### Nginx Configuration
 
-The deployment pipeline uses the separate `dhaba-deployer` ServiceAccount, while the refresh Job uses `ecr-secret-refresher`.
+File:
 
-This separation prevents the deployment pipeline from needing direct permission to manage ECR pull credentials.
+`/etc/nginx/sites-enabled/dhaba`
 
-### Manual Testing
+Existing configuration:
 
-To manually trigger the refresh process:
+```nginx
+server {
+    listen 80;
+    server_name devopsnktask.duckdns.org;
+
+    location / {
+        proxy_pass http://192.168.49.2:31742;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+server {
+    listen 80;
+    server_name devopsnktask-staging.duckdns.org;
+
+    location / {
+        proxy_pass http://192.168.49.2:31742;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Check Nginx configuration:
+
+```bash
+sudo nginx -t
+```
+
+Reload Nginx:
+
+```bash
+sudo systemctl reload nginx
+```
+
+---
+
+## 5. C9 – Automatic ECR Pull Secret Refresh
+
+### Purpose
+
+ECR authentication tokens expire after 12 hours.
+
+Kubernetes needs valid registry credentials to pull private application images.
+
+We implemented a Kubernetes CronJob that refreshes the ECR pull secret every six hours.
+
+### Files
+
+```text
+k8s/
+└── ops/
+    └── ecr-secret-refresh/
+        ├── kustomization.yaml
+        ├── rbac-cronjob.yaml
+        └── refresh-ecr-secrets-k8s.py
+```
+
+Additional script:
+
+```text
+scripts/refresh-ecr-secrets.sh
+```
+
+### Implementation
+
+- CronJob name: ecr-secret-refresh
+- Namespace: ops
+- Schedule: Every six hours
+- ServiceAccount: ecr-secret-refresher
+- Target namespaces: staging and production
+
+CronJob schedule:
+
+```yaml
+schedule: "0 */6 * * *"
+```
+
+The Python script obtains an ECR authentication token using AWS CLI and updates the existing `ecr-pull-secret` in both application namespaces.
+
+### Security
+
+- EC2 uses an IAM role called DhabaEC2ECRRole.
+- No permanent AWS access keys are stored in Kubernetes.
+- The ServiceAccount has permission to update only the named ECR secret in staging and production.
+- hostNetwork is enabled so the refresher can access EC2 instance metadata.
+- IMDSv2 hop limit is configured to 2.
+
+### Kustomize Configuration
+
+`k8s/ops/ecr-secret-refresh/kustomization.yaml`
+
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - rbac-cronjob.yaml
+
+configMapGenerator:
+  - name: ecr-secret-refresh-script
+    namespace: ops
+    files:
+      - refresh-ecr-secrets-k8s.py
+```
+
+### Test the CronJob
+
+Create a test Job:
 
 ```bash
 kubectl create job ecr-secret-refresh-test \
@@ -95,19 +282,13 @@ kubectl create job ecr-secret-refresh-test \
   -n ops
 ```
 
-Check the Job status:
-
-```bash
-kubectl get jobs -n ops
-```
-
-Check the logs:
+Check logs:
 
 ```bash
 kubectl logs job/ecr-secret-refresh-test -n ops
 ```
 
-Expected successful output:
+Expected output:
 
 ```text
 staging: refreshed successfully (200)
@@ -115,31 +296,186 @@ production: refreshed successfully (200)
 ECR credentials refreshed in both namespaces.
 ```
 
-Clean up the test Job:
+Delete the test Job:
 
 ```bash
 kubectl delete job ecr-secret-refresh-test -n ops
 ```
 
-### Security Considerations and Risks
+---
 
-1. **No permanent AWS credentials:** The implementation uses the EC2 IAM role instead of storing permanent AWS credentials in Kubernetes.
+## 6. C10 – Restricted Kubernetes Deployment Permissions
 
-2. **IMDSv2 protection:** The EC2 metadata service uses IMDSv2 to obtain temporary credentials. The instance metadata hop limit must permit access from the host-networked Pod.
+### Purpose
 
-3. **Host networking:** The CronJob requires host networking to access the EC2 metadata service. This increases the Pod's network access, so the workload must remain restricted and its image and permissions should be reviewed.
+The GitHub deployment pipeline should not use cluster-admin permissions.
 
-4. **Least privilege:** The refresh ServiceAccount only receives permission to update the specifically named ECR pull Secret in the two application namespaces.
+We created a dedicated Linux user and Kubernetes ServiceAccount.
 
-5. **Token expiration:** ECR authentication tokens are valid for approximately 12 hours. Refreshing every 6 hours reduces the risk of token expiration during deployments.
+### Linux Deployment User
 
-6. **Image security:** The CronJob uses the AWS CLI container image. Its version should be pinned and updated regularly rather than relying indefinitely on the `latest` tag.
+Username:
 
-### Benefits
+`dhaba-deploy`
 
-- Prevents expired ECR credentials from interrupting deployments.
-- Removes the need for manually refreshing image pull secrets.
-- Avoids storing permanent AWS credentials in Kubernetes.
-- Uses a dedicated ServiceAccount with restricted permissions.
-- Supports both staging and production environments.
-- Integrates directly with the GitHub Actions deployment pipeline.
+Repository:
+
+`/home/dhaba-deploy/Dhaba-dev`
+
+The deployment user does not have sudo or Docker group permissions.
+
+Switch from ubuntu:
+
+```bash
+sudo su - dhaba-deploy
+```
+
+Go to the repository:
+
+```bash
+cd /home/dhaba-deploy/Dhaba-dev
+```
+
+### Kubernetes ServiceAccount
+
+Name:
+
+`dhaba-deployer`
+
+Namespace:
+
+`ops`
+
+RBAC file:
+
+`k8s/rbac/deployer.yaml`
+
+The deployment identity has namespace-scoped permissions for the required deployment resources.
+
+Permissions include:
+
+- Deployments
+- StatefulSets
+- Services
+- ConfigMaps
+- Ingresses
+- Pod inspection
+- ReplicaSet inspection
+- Limited access to postgres-secret
+- Jobs and CronJobs in ops
+
+It cannot delete namespaces or access the ECR pull secret.
+
+### Apply RBAC
+
+```bash
+kubectl apply -f k8s/rbac/deployer.yaml
+```
+
+### Verify Permissions
+
+Check deployment creation:
+
+```bash
+kubectl auth can-i create deployments -n staging
+```
+
+Check production deployment updates:
+
+```bash
+kubectl auth can-i patch deployments -n production
+```
+
+Check database secret access:
+
+```bash
+kubectl auth can-i get secret postgres-secret -n staging
+```
+
+Check that ECR credentials are protected:
+
+```bash
+kubectl auth can-i get secret ecr-pull-secret -n staging
+```
+
+Check namespace deletion restriction:
+
+```bash
+kubectl auth can-i delete namespaces
+```
+
+Expected results:
+
+- Required deployment operations: yes
+- ECR pull secret access: no
+- Namespace deletion: no
+
+### GitHub Secrets
+
+The deployment workflow uses:
+
+- DHABA_DEPLOY_SSH_KEY
+
+The deployment user authenticates to EC2 using SSH.
+
+---
+
+## 7. C11 – Automated Staging Deployment
+
+### Workflow
+
+`.github/workflows/deploy-staging.yml`
+
+### Trigger
+
+The staging deployment starts after the Build and Push Images to ECR workflow completes successfully on the main branch.
+
+### Deployment Process
+
+1. GitHub Actions waits for the image build workflow.
+2. The workflow connects to EC2 using SSH.
+3. It checks out the exact commit and extracts Kubernetes manifests and scripts.
+4. It refreshes ECR credentials using the existing CronJob.
+5. It applies the staging Kubernetes overlay.
+6. It deploys the required application images.
+7. It waits for all six Deployments to roll out.
+8. It runs the web health endpoint smoke test.
+9. It runs the load test.
+10. It creates an immutable release ConfigMap after successful verification.
+
+### Verify Staging
+
+```bash
+kubectl get pods -n staging
+kubectl get deployments -n staging
+kubectl get services -n staging
+kubectl get ingress -n staging
+```
+
+Check rollout:
+
+```bash
+kubectl rollout status deployment/web -n staging
+```
+
+Repeat for the other application Deployments if required.
+
+### Health Check
+
+```bash
+curl -i http://devopsnktask-staging.duckdns.org/health
+```
+
+Expected response:
+
+```json
+{"status":"ok","service":"web"}
+```
+
+---
+
+## 8. C12 – Production Deployment With Approval
+
+### Workflow
+
+`.github/workflows/deploy-production.yml
