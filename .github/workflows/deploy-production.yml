@@ -124,11 +124,12 @@ jobs:
 
             trap on_exit EXIT
 
-            # Verify cluster and namespace access.
-            kubectl get namespace "$SOURCE_NAMESPACE" >/dev/null ||
+            # Verify cluster and namespace access (namespaced checks: the
+            # deployer SA cannot read cluster-scoped namespace objects).
+            kubectl get deployments -n "$SOURCE_NAMESPACE" >/dev/null ||
               fail "Staging namespace unavailable"
 
-            kubectl get namespace "$NAMESPACE" >/dev/null ||
+            kubectl get deployments -n "$NAMESPACE" >/dev/null ||
               fail "Production namespace unavailable"
 
             # Verify production database credentials.
