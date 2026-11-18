@@ -7,4 +7,4 @@ resources:
 configMapGenerator:
   - name: ecr-secret-refresh-script
     files:
-      - refresh-ecr-secrets-k8s.py=../../../scripts/refresh-ecr-secrets-k8s.py
+      - refresh-ecr-secrets-k8s.py
