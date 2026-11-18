@@ -148,8 +148,16 @@ jobs:
             done
 
             # Refresh ECR pull credentials.
-            bash "$WORK_DIR/scripts/refresh-ecr-secrets.sh" ||
+            # Runs as the ecr-secret-refresher SA via the ops CronJob, so the
+            # deployer never touches ECR credentials directly.
+            ECR_JOB="ecr-refresh-$(date +%s)"
+            kubectl create job "$ECR_JOB" --from=cronjob/ecr-secret-refresh -n ops ||
+              fail "could not start ECR refresh job"
+            if ! kubectl wait --for=condition=complete "job/$ECR_JOB" -n ops --timeout=180s; then
+              kubectl logs "job/$ECR_JOB" -n ops --tail=100 || true
               fail "ECR pull-secret refresh failed"
+            fi
+            kubectl delete job "$ECR_JOB" -n ops --wait=false || true
 
             # Capture the current deployment state.
             for deployment in "${DEPLOYMENTS[@]}"; do
