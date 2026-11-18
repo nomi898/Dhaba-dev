@@ -28,7 +28,21 @@ jobs:
       name: ${{ inputs.environment }}
 
     steps:
+      - name: Notify Slack - Rollback Started
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          MESSAGE="Rollback started for Dhaba in ${ENVIRONMENT}."
+          curl -fsS -X POST \
+            -H 'Content-type: application/json' \
+            --data "$(jq -n --arg text "$MESSAGE" --arg url "$RUN_URL" '{text: ($text + "\n" + $url)}')" \
+            "$SLACK_WEBHOOK_URL"
+
       - name: Roll back Dhaba Deployments
+        id: rollback
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: 51.20.193.202
@@ -86,3 +100,23 @@ jobs:
             echo "Smoke test failed."
             cat /tmp/dhaba-rollback-port-forward.log
             exit 1
+
+      - name: Notify Slack - Rollback Result
+        if: always()
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          RESULT: ${{ steps.rollback.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$RESULT" = "success" ]; then
+            MESSAGE="Dhaba rollback succeeded in ${ENVIRONMENT}."
+          else
+            MESSAGE="Dhaba rollback FAILED in ${ENVIRONMENT}."
+          fi
+
+          curl -fsS -X POST \
+            -H 'Content-type: application/json' \
+            --data "$(jq -n --arg text "$MESSAGE" --arg url "$RUN_URL" '{text: ($text + "\n" + $url)}')" \
+            "$SLACK_WEBHOOK_URL"
