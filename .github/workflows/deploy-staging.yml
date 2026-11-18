@@ -28,8 +28,8 @@ jobs:
           AWS_REGION: eu-north-1
         with:
           host: ${{ secrets.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
+          username: dhaba-deploy
+          key: ${{ secrets.EC2_DEPLOY_KEY }}
           envs: IMAGE_TAG,AWS_ACCOUNT_ID,AWS_REGION
           command_timeout: 30m
           script: |
