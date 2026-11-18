@@ -134,8 +134,9 @@ jobs:
             git archive "$IMAGE_TAG" k8s scripts | tar -x -C "$WORK_DIR" ||
               fail "could not extract k8s/ and scripts/ from $IMAGE_TAG"
 
-            kubectl get namespace "$NAMESPACE" >/dev/null ||
-              fail "cannot reach the cluster, or namespace $NAMESPACE does not exist"
+            # Namespaced check: the deployer SA cannot read cluster-scoped namespaces.
+            kubectl get deployments -n "$NAMESPACE" >/dev/null ||
+              fail "cannot reach the cluster, or no access to namespace $NAMESPACE"
 
             # Verify PostgreSQL credentials.
             for key in POSTGRES_USER POSTGRES_PASSWORD; do
