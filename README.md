@@ -1,95 +1,145 @@
-# Dhaba Orders
+## C9 – Automatic ECR Image Pull Secret Refresh
 
-A local restaurant ordering system with a React customer/kitchen/statistics UI, FastAPI menu service, Go orders API, Spring Boot queue worker, Laravel statistics API, PostgreSQL and Redis. Run the services directly on your development machine. Container and deployment setup is intentionally deferred.
+### Overview
 
-## Repository layout
+Amazon Elastic Container Registry (ECR) uses temporary authentication tokens to allow Kubernetes Pods to pull private Docker images.
 
-- `web/` — React + Vite frontend. Customer ordering, order tracking, kitchen board and live stats.
-- `menu-api/` — FastAPI menu endpoints with PostgreSQL reads and Redis caching.
-- `orders-api/` — Go order validation, persistence, status endpoints and Redis jobs.
-- `kitchen-worker/` — Spring Boot non-web worker, Redis queue consumer and heartbeat.
-- `stats-api/` — Laravel API backed by Redis order metrics.
-- `database/postgres/` — schema and sample-data SQL scripts.
+These authentication tokens are valid for approximately **12 hours**. If the token expires, Kubernetes may fail to pull images from ECR, resulting in `ImagePullBackOff` errors.
 
-## Requirements
+To prevent this, Dhaba implements an automated Kubernetes CronJob that refreshes ECR credentials every 6 hours.
 
-Install PostgreSQL 14+ and Redis 6+ locally, plus Node.js 20+, Python 3.11+, Go 1.23+, Java 21+, PHP 8.2+ and Composer. No container runtime is required.
+### Architecture
 
-## Configure local services
+The refresh process works as follows:
 
-Copy `.env.example` to `.env` and set `POSTGRES_PASSWORD`. In a shell at the repository root, load the values with `set -a; source .env; set +a` before starting backend services. Never commit `.env` files.
+1. Kubernetes CronJob runs every 6 hours in the `ops` namespace.
+2. A Job creates a temporary Pod using the `amazon/aws-cli` image.
+3. The Pod accesses the EC2 instance's IAM role through the EC2 Instance Metadata Service (IMDSv2).
+4. AWS CLI obtains a temporary ECR authentication token.
+5. The refresh script communicates with the Kubernetes API.
+6. The script updates the existing `ecr-pull-secret` in both `staging` and `production` namespaces.
+7. Kubernetes uses the refreshed credentials when pulling private images from ECR.
 
-On macOS with Homebrew:
+### Configuration
 
-```sh
-brew install go postgresql@16 redis golangci-lint
-brew services start postgresql@16
-brew services start redis
-export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"
+**CronJob details**
 
-set -a; source .env; set +a
-psql -d postgres -c "CREATE ROLE $POSTGRES_USER LOGIN PASSWORD '$POSTGRES_PASSWORD'"
-createdb -O "$POSTGRES_USER" "$POSTGRES_DB"
-export PGPASSWORD=$POSTGRES_PASSWORD
-psql -h localhost -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f database/postgres/001_schema.sql
-psql -h localhost -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f database/postgres/002_seed.sql
+| Setting | Value |
+|---|---|
+| CronJob name | `ecr-secret-refresh` |
+| Namespace | `ops` |
+| Schedule | `0 */6 * * *` |
+| Container image | `amazon/aws-cli:latest` |
+| AWS Region | `eu-north-1` |
+| AWS Authentication | EC2 IAM Role |
+| Authentication method | IMDSv2 |
+| Target namespaces | `staging`, `production` |
+| Secret name | `ecr-pull-secret` |
+
+The CronJob uses `hostNetwork: true` and `dnsPolicy: ClusterFirstWithHostNet` to access the EC2 metadata service from the Pod.
+
+### IAM Authentication
+
+The CronJob uses the EC2 IAM role:
+
+`DhabaEC2ECRRole`
+
+This role provides the permissions required to authenticate with Amazon ECR.
+
+The implementation does not store permanent AWS access keys or secret access keys inside Kubernetes Secrets or environment variables.
+
+Instead, it obtains temporary credentials through IMDSv2.
+
+### Kubernetes RBAC
+
+A dedicated ServiceAccount named `ecr-secret-refresher` runs the refresh process in the `ops` namespace.
+
+It has restricted permissions through Kubernetes Roles and RoleBindings.
+
+Its permissions are limited to:
+
+- Accessing the `ecr-pull-secret` Secret in the `staging` namespace.
+- Updating and patching that Secret.
+- Accessing the `ecr-pull-secret` Secret in the `production` namespace.
+- Updating and patching that Secret.
+
+It does not require cluster-admin permissions.
+
+### Deployment Pipeline Integration
+
+The staging and production GitHub Actions workflows trigger the ECR refresh CronJob manually before deploying application workloads.
+
+They create a Job from the existing CronJob:
+
+```bash
+kubectl create job "$JOB_NAME" \
+  --from=cronjob/ecr-secret-refresh \
+  -n ops
 ```
 
-Both SQL scripts are idempotent and safe to re-run. If Redis has a password, set the same value in each service environment.
+The workflows wait for the Job to complete successfully before continuing with deployment.
 
-## Run services
+This ensures that the ECR credentials are refreshed before Kubernetes attempts to pull the new application images.
 
-Start each process in a separate terminal from the repository root:
+The deployment pipeline uses the separate `dhaba-deployer` ServiceAccount, while the refresh Job uses `ecr-secret-refresher`.
 
-```sh
-# Menu API
-cd menu-api && python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+This separation prevents the deployment pipeline from needing direct permission to manage ECR pull credentials.
+
+### Manual Testing
+
+To manually trigger the refresh process:
+
+```bash
+kubectl create job ecr-secret-refresh-test \
+  --from=cronjob/ecr-secret-refresh \
+  -n ops
 ```
 
-```sh
-# Orders API
-cd orders-api && go run ./cmd/server
+Check the Job status:
+
+```bash
+kubectl get jobs -n ops
 ```
 
-```sh
-# Kitchen worker
-cd kitchen-worker && mvn spring-boot:run
+Check the logs:
+
+```bash
+kubectl logs job/ecr-secret-refresh-test -n ops
 ```
 
-```sh
-# Statistics API
-cd stats-api && composer install
-cp .env.example .env  # first run only; set APP_KEY with php artisan key:generate
-php artisan serve --host 127.0.0.1 --port 8082
+Expected successful output:
+
+```text
+staging: refreshed successfully (200)
+production: refreshed successfully (200)
+ECR credentials refreshed in both namespaces.
 ```
 
-```sh
-# Frontend
-cd web && npm install && npm run dev
+Clean up the test Job:
+
+```bash
+kubectl delete job ecr-secret-refresh-test -n ops
 ```
 
-Open the Vite URL shown in the terminal (normally `http://localhost:5173`). The Vite proxy forwards `/api/menu`, `/api/orders` and `/api/stats` to the local APIs. Set `MENU_API_URL`, `ORDERS_API_URL` and `STATS_API_URL` if you use different ports.
+### Security Considerations and Risks
 
-The APIs expose health checks at `/health`; the Go service also exposes `/info`. Kitchen status can be advanced from the kitchen board. Set `KITCHEN_AUTO_ADVANCE=false` to disable the worker's timed status progression.
+1. **No permanent AWS credentials:** The implementation uses the EC2 IAM role instead of storing permanent AWS credentials in Kubernetes.
 
-## Tests and quality checks
+2. **IMDSv2 protection:** The EC2 metadata service uses IMDSv2 to obtain temporary credentials. The instance metadata hop limit must permit access from the host-networked Pod.
 
-```sh
-cd web && npm test && npm run lint && npm run build
-cd menu-api && pytest && ruff check .
-cd orders-api && go test ./... && golangci-lint run
-cd kitchen-worker && mvn test && mvn checkstyle:check
-cd stats-api && composer test && composer analyse
-```
+3. **Host networking:** The CronJob requires host networking to access the EC2 metadata service. This increases the Pod's network access, so the workload must remain restricted and its image and permissions should be reviewed.
 
-## Order lifecycle integration check
+4. **Least privilege:** The refresh ServiceAccount only receives permission to update the specifically named ECR pull Secret in the two application namespaces.
 
-1. Confirm all APIs report healthy and the frontend can load menu categories.
-2. Place an order from the customer page and confirm a persisted order ID is returned.
-3. Confirm the order appears on the kitchen board and moves through `NEW`, `COOKING`, and `READY`.
-4. Open order tracking with the returned ID and confirm status updates.
-5. Confirm the statistics dashboard reflects the order and item counts.
+5. **Token expiration:** ECR authentication tokens are valid for approximately 12 hours. Refreshing every 6 hours reduces the risk of token expiration during deployments.
 
-See `.env.example` for the supported shared configuration keys. PostgreSQL and Redis must be running before using the full order flow.
+6. **Image security:** The CronJob uses the AWS CLI container image. Its version should be pinned and updated regularly rather than relying indefinitely on the `latest` tag.
+
+### Benefits
+
+- Prevents expired ECR credentials from interrupting deployments.
+- Removes the need for manually refreshing image pull secrets.
+- Avoids storing permanent AWS credentials in Kubernetes.
+- Uses a dedicated ServiceAccount with restricted permissions.
+- Supports both staging and production environments.
+- Integrates directly with the GitHub Actions deployment pipeline.
