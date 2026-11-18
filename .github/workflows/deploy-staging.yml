@@ -270,6 +270,17 @@ jobs:
             echo
             echo "Staging smoke test passed."
 
+            # C14: staging load test over the same port-forward.
+            echo "Starting staging load test..."
+
+            bash "$WORK_DIR/scripts/load.sh" \
+              "http://127.0.0.1:$SMOKE_PORT/health" \
+              100 \
+              10 ||
+              fail "Staging load test failed"
+
+            echo "Staging load test passed."
+
             # Record the exact images running in staging.
             RELEASE_NAME="release-$IMAGE_TAG"
             declare -A DEPLOYED_IMAGES=()
