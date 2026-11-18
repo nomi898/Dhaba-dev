@@ -9,7 +9,7 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch"]
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["postgres-secret"]
+    resourceNames: ["postgres-secret", "ecr-pull-secret"]
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["pods/portforward"]
