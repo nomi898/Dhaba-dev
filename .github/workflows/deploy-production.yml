@@ -274,6 +274,18 @@ jobs:
               fail "Production smoke test failed"
 
             echo
+            echo "Production smoke test passed."
+
+            # C14: production load test over the same port-forward.
+            echo "Starting production load test..."
+
+            bash "$DEPLOY_DIR/scripts/load.sh" \
+              http://127.0.0.1:18081/health \
+              100 \
+              10 ||
+              fail "Production load test failed"
+
+            echo "Production load test passed."
 
             DEPLOY_SUCCEEDED=true
 
